@@ -52,7 +52,8 @@ module i2c_master(input				i_clk,				//input clock to the module @100MHz (or wha
                   output reg [2:0]  cntr,
                   output reg [7:0]  byte_sr,
                   output reg        read_sub_addr_sent_flag,
-                  output reg        data_in_sr,
+                  output reg [7:0]  data_to_write,
+                  output reg [7:0]  data_in_sr,
                   
                   //400KHz clock generation
                   output reg        clk_i2c,
@@ -62,7 +63,8 @@ module i2c_master(input				i_clk,				//input clock to the module @100MHz (or wha
                   output reg [1:0]  sda_prev,
                   output reg [1:0]  sda_curr,
                   output reg        scl_prev,
-                  output reg        scl_curr
+                  output reg        scl_curr,
+                  output reg        ack_in_prog
 				  `endif
 				  );
 				  
@@ -95,6 +97,7 @@ reg [2:0]  cntr;
 reg [7:0]  byte_sr;
 reg        read_sub_addr_sent_flag;
 reg [7:0]  data_to_write;
+reg [7:0]  data_in_sr;
 
 //For generation of 400KHz clock
 reg clk_i2c;
@@ -105,7 +108,7 @@ reg [1:0] sda_curr;    //So this one is asynchronous especially with replies fro
 reg       sda_prev;
 reg scl_prev, sda_curr;          //master will always drive this line, so it doesn't matter
 
-reg read_curr_loc;      //Denotes that sub_addr was already sent, thus will skip in state (read from current location in CCI)
+reg ack_in_prog;      //For sending acks during read
 `endif
 
 //clk_i2c 400KHz is synchronous to i_clk, so no need for 2 reg synchronization chain in other blocks
@@ -127,12 +130,18 @@ end
 //Main FSM
 always@(posedge i_clk or negedge reset_n) begin
 	if(!reset_n) begin
-		{busy, addr, sub_addr, sub_len, en_scl} <= 0;
-        {byte_sent, cntr, nack, read_sub_addr_sent_flag} <= 0;
-        {sda_next} <= 1'bz;
+        {data_out, valid_out} <= 0;
+		{req_data_chunk, busy, nack} <= 0;
+        {addr, rw, sub_addr, sub_len, byte_len, en_scl} <= 0;
+        {byte_sent, num_byte_sent, cntr, byte_sr} <= 0;
+        {read_sub_addr_sent_flag, data_to_write, data_in_sr} <= 0;
+        ack_in_prog <= 1'b0;
+        reg_sda_o <= 1'bz;
 		state <= IDLE;
+        next_state <= IDLE;
 	end
 	else begin
+        valid_out <= 1'b0;
 		case(state)
             /***
              * State: IDLE
@@ -143,16 +152,27 @@ always@(posedge i_clk or negedge reset_n) begin
              */
 			IDLE: begin
                 if(req_trans & !busy) begin
+                    //set busy
                     busy <= 1'b1;
+                    //Set FSM in motion
                     state <= START;
                     next_state <= SLAVE_ADDR;
+                    
+                    //Set all master inputs to local registers to modify and or reference later
                     addr <= i_addr_w_rw;
                     rw <= i_addr_w_rw[0];
                     sub_addr <= i_sub_len ? i_sub_addr : {i_sub_addr[7:0], 8'b0};
                     sub_len <= i_sub_len;
-                    nack <= 1'b0;                           
-                    en_scl <= 1'b1;                         //begin the 400kHz generation
+                    data_to_write <= i_data_write;
+
+                    //begin the 400kHz generation                    
+                    en_scl <= 1'b1;
+                    
+                    //Reset flags and or counters
+                    nack <= 1'b0;  
                     read_sub_addr_sent_flag <= 1'b0;
+                    num_byte_sent <= 0;
+                    byte_sent <= 1'b0;
                 end
 			end
 			
@@ -171,18 +191,25 @@ always@(posedge i_clk or negedge reset_n) begin
                     state <= SLAVE_ADDR;
                 end
 			end
-			
+            
+			/***
+             * State: SLAVE_ADDR
+             * Purpose: Write slave addr and based on state of system, move to sub_addr or read
+             * How it works: We know that this state will go to either read or to writing the sub addr.
+             *               If we reach this state again, the flag will be set, and we know we are performing
+             *               a read.
+             */
 			SLAVE_ADDR: begin
-                //When scl has fallen, we can change sda
-                if(!scl_curr & scl_prev) begin
-                    if(byte_sent) begin
-                        byte_sent <= 1'b0;                      //deassert the flag
-                        next_state <= read_sub_addr_sent_flag ? READ : SUB_ADDR;    //Check to see if sub addr was sent, we ony reach this state again if doing a read
-                        byte_sr <= sub_addr[15:8];              //regardless of sub addr length, higher byte will be sent first
-                        state <= ACK_NACK_RX;                   //await for nack_ack
-                        reg_sda_o <= 1'bz;                      //release sda line
-                    end
-                    else begin
+                //When scl has fallen, we can change sda 
+                if(byte_sent) begin
+                    byte_sent <= 1'b0;                      //deassert the flag
+                    next_state <= read_sub_addr_sent_flag ? READ : SUB_ADDR;    //Check to see if sub addr was sent, we ony reach this state again if doing a read
+                    byte_sr <= sub_addr[15:8];              //regardless of sub addr length, higher byte will be sent first
+                    state <= ACK_NACK_RX;                   //await for nack_ack
+                    reg_sda_o <= 1'bz;                      //release sda line
+                end
+                else begin
+                    if(!scl_curr & scl_prev) begin
                         {byte_sent, cntr} <= cntr + 1'b1;       //incr cntr, with overflow being caught (due to overflow, no need to set cntr to 0)
                         reg_sda_o <= byte_sr[7];                //send MSB
                         byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
@@ -199,26 +226,26 @@ always@(posedge i_clk or negedge reset_n) begin
              *               states.
              */
 			SUB_ADDR: begin
-                if(!scl_curr & scl_prev) begin
-                    if(byte_sent) begin
-                        if(sub_len) begin                       //1 for 16 bit
-                            state <= ACK_NACK_RX;
-                            next_state <= SUB_ADDR;
-                            sub_len <= 1'b0;                    //denote only want 8 bit next time
-                            byte_sr <= sub_addr[7:0];           //set the byte shift register
-                        end
-                        else begin
-                            next_state <= rw ? START : WRITE;   //move to appropriate state
-                            byte_sr <= rw ? byte_sr : data_to_write; //if write, want to setup the data to write to device
-                            read_sub_addr_sent_flag <= 1'b1;    //For dictating state of machine
-                            en_scl <= 1'b0;
-                        end
-                            
-                        byte_sent <= 1'b0;                      //deassert the flag
-                        state <= ACK_NACK_RX;                   //await for nack_ack
-                        reg_sda_o <= 1'bz;                       //release sda line
+                if(byte_sent) begin
+                    if(sub_len) begin                       //1 for 16 bit
+                        state <= ACK_NACK_RX;
+                        next_state <= SUB_ADDR;
+                        sub_len <= 1'b0;                    //denote only want 8 bit next time
+                        byte_sr <= sub_addr[7:0];           //set the byte shift register
                     end
                     else begin
+                        next_state <= rw ? START : WRITE;   //move to appropriate state
+                        byte_sr <= rw ? byte_sr : data_to_write; //if write, want to setup the data to write to device
+                        read_sub_addr_sent_flag <= 1'b1;    //For dictating state of machine
+                        en_scl <= 1'b0;
+                    end
+                        
+                    byte_sent <= 1'b0;                      //deassert the flag
+                    state <= ACK_NACK_RX;                   //await for nack_ack
+                    reg_sda_o <= 1'bz;                       //release sda line
+                end
+                else begin
+                    if(!scl_curr & scl_prev) begin
                         {byte_sent, cntr} <= cntr + 1'b1;       //incr cntr, with overflow being caught
                         reg_sda_o <=  byte_sr[7];                //send MSB
                         byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
@@ -226,17 +253,27 @@ always@(posedge i_clk or negedge reset_n) begin
                 end
 			end
 			
+            /***
+             * State: Reads
+             * Purpose: Read 1 byte messages that are set on posedge of i2c_clk
+             * How it Works:
+             */
 			READ: begin
                 if(byte_sent) begin
-                    byte_sent <= 1'b0;
-                    data_out  <= data_in_sr;
-                    valid_out <= 1'b1;
-                    
+                    byte_sent <= 1'b0;          //reset flag
+                    data_out  <= data_in_sr;    //put information in valid output
+                    valid_out <= 1'b1;          //Let master know valid output
+                    state <= ACK_NACK_TX;       //Send ack
+                    next_state <= (num_byte_sent == byte_len-1) ? STOP : READ;      //Have we read all bytes?
+                    num_byte_sent <= num_byte_sent + 1;  //Incr number of bytes read
+                    ack_in_prog <= 1'b1;
                 end
                 else begin
-                    valid_out <= 1'b0;
-                    {byte_sent, cntr} <= cntr + 1'b1;
-                    data_in_sr <= {data_in_sr[7:1], sda_o};
+                    if(!scl_prev & scl_curr) begin
+                        valid_out <= 1'b0;
+                        {byte_sent, cntr} <= cntr + 1'b1;
+                        data_in_sr <= {data_in_sr[7:1], sda_prev};
+                    end
                 end
 			end
 			
@@ -244,14 +281,16 @@ always@(posedge i_clk or negedge reset_n) begin
 			end
 			
 			STOP: begin 
-                valid_out <= 1'b0;
-                state <= IDLE;                              //reset to IDLE
-                read_sub_addr_sent_flag <= 1'b0;            //reset flag
+                if(scl_curr & scl_prev) begin
+                    valid_out <= 1'b0;
+                    state <= IDLE;                              //reset to IDLE
+                    read_sub_addr_sent_flag <= 1'b0;            //reset flag
+                end
 			end
             
             ACK_NACK_RX: begin
-                if(scl_prev & scl_curr & (sda_curr[1] == sda_prev)) begin
-                    if(!sda_curr[1]) begin      //checking for the ack condition (its low)
+                if(!scl_prev & scl_curr) begin
+                    if(!sda_prev) begin      //checking for the ack condition (its low)
                         state <= next_state;
                         $display("$t, rx ack encountered", $time);
                     end
@@ -264,7 +303,23 @@ always@(posedge i_clk or negedge reset_n) begin
                 end
             end
 			
+            /***
+             * State: ACK_NACK_TX
+             * Purpose: Take hold of SDA to acknowledge the read
+             * How it works: On first negedge, since previous state will move on posedge, 
+             *               pull the line low for an ack. On second negedge, release sda.
+             */
             ACK_NACK_TX: begin
+                if(!scl_curr & scl_prev) begin      //negedge
+                    if(ack_in_prog) begin 
+                        reg_sda_o <= 1'b0;          //write ack until negedge of clk
+                        ack_in_prog <= 1'b0;
+                    end
+                    else begin
+                        reg_sda_o <= 1'bz;
+                        state <= next_state;
+                    end
+                end
             end
             
 			default:
