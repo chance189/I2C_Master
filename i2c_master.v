@@ -60,7 +60,7 @@ module i2c_master(input				i_clk,				//input clock to the module @100MHz (or wha
                   output reg [15:0] clk_i2c_cntr,
                   
                   //sampling sda and scl
-                  output reg [1:0]  sda_prev,
+                  output reg        sda_prev,
                   output reg [1:0]  sda_curr,
                   output reg        scl_prev,
                   output reg        scl_curr,
@@ -212,12 +212,13 @@ always@(posedge i_clk or negedge reset_n) begin
              */
 			SLAVE_ADDR: begin
                 //When scl has fallen, we can change sda 
-                if(byte_sent) begin
+                if(byte_sent & cntr[0]) begin
                     byte_sent <= 1'b0;                      //deassert the flag
                     next_state <= read_sub_addr_sent_flag ? READ : SUB_ADDR;    //Check to see if sub addr was sent, we ony reach this state again if doing a read
                     byte_sr <= sub_addr[15:8];              //regardless of sub addr length, higher byte will be sent first
                     state <= ACK_NACK_RX;                   //await for nack_ack
                     reg_sda_o <= 1'bz;                      //release sda line
+                    cntr <= 0;
                 end
                 else begin
                     if(!scl_curr & scl_prev) begin
@@ -237,7 +238,7 @@ always@(posedge i_clk or negedge reset_n) begin
              *               states.
              */
 			SUB_ADDR: begin
-                if(byte_sent) begin
+                if(byte_sent & cntr[0]) begin
                     if(sub_len) begin                       //1 for 16 bit
                         state <= ACK_NACK_RX;
                         next_state <= SUB_ADDR;
@@ -250,7 +251,8 @@ always@(posedge i_clk or negedge reset_n) begin
                         read_sub_addr_sent_flag <= 1'b1;    //For dictating state of machine
                         en_scl <= 1'b0;
                     end
-                        
+                    
+                    cntr <= 0;
                     byte_sent <= 1'b0;                      //deassert the flag
                     state <= ACK_NACK_RX;                   //await for nack_ack
                     reg_sda_o <= 1'bz;                       //release sda line
@@ -298,9 +300,11 @@ always@(posedge i_clk or negedge reset_n) begin
              *               When all bytes are written, quit comms.
              */
 			WRITE: begin
-                if(byte_sent) begin
+                if(byte_sent & cntr[1]) begin
+                    cntr <= 0;
                     byte_sent <= 1'b0;
                     state <= ACK_NACK_RX;
+                    reg_sda_o <= 1'bz;
                     next_state <= (num_byte_sent == byte_len-1) ? STOP : GRAB_DATA;
                     num_byte_sent <= num_byte_sent + 1'b1;
                 end
