@@ -65,8 +65,36 @@ end
 //run test here
 initial begin
     reset_n = 0;
+    request_transmit = 1'b0;
     #500;
     reset_n = 1;
+    
+    $display("Read_2 Bytes Test:");
+    //Do read test of 16bit address
+    slave_addr = {I2C_ADDR, 1'b1};
+    i_data_write = 8'hFE;
+    i_sub_addr = 8'h2E;
+    i_sub_len = 1'b0;
+    i_byte_len = 23'd2;
+    @(posedge clk);
+    request_transmit <= 1'b1;
+    #10;
+    request_transmit <= 1'b0;
+    
+    @(negedge busy);
+    
+    $display("Write 2 Bytes Test:");
+    slave_addr = {I2C_ADDR, 1'b0};
+    i_data_write = 8'hFE;
+    i_sub_addr = 8'h2E;
+    i_sub_len = 1'b0;
+    i_byte_len = 23'd2;
+    @(posedge clk);
+    request_transmit <= 1'b1;
+    #10;
+    request_transmit <= 1'b0;
+    @(negedge busy);
+    
 end
 
 i2c_master DUT(.i_clk(clk),				//input clock to the module @100MHz (or whatever crystal you have on the board)
