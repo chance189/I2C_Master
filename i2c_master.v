@@ -46,7 +46,7 @@ module i2c_master(input				i_clk,				//input clock to the module @100MHz (or wha
                   output reg [15:0] sub_addr,
                   output reg        sub_len,
                   output reg [23:0] byte_len,
-                  output reg        en_Scl,
+                  output reg        en_scl,
                   output reg        byte_sent,
                   output reg [23:0] num_byte_sent,
                   output reg [2:0]  cntr,
@@ -64,7 +64,10 @@ module i2c_master(input				i_clk,				//input clock to the module @100MHz (or wha
                   output reg [1:0]  sda_curr,
                   output reg        scl_prev,
                   output reg        scl_curr,
-                  output reg        ack_in_prog
+                  output reg        ack_in_prog,
+                  output reg        ack_nack,
+                  output reg        en_end_indicator,
+                  output reg        grab_next_data
 				  `endif
 				  );
 				  
@@ -75,9 +78,11 @@ localparam [3:0] IDLE        = 4'd0,
                  
 				 READ		 = 4'd4,
 				 WRITE		 = 4'd5,
-				 ACK_NACK_RX = 4'd6,
-                 ACK_NACK_TX = 4'd7,
+                 GRAB_DATA   = 4'd6,
+				 ACK_NACK_RX = 4'd7,
+                 ACK_NACK_TX = 4'd8,
 				 STOP		 = 4'd9;
+                 RELEASE_BUS = 4'hA;
                  
 localparam [15:0] DIV_100MHZ = 16'd125;     //desire 400KHz, have 100MHz, thus (1/(400*10^3)*100*10^6)/2, note div by 2 is for need to change in cycle
 
@@ -109,6 +114,10 @@ reg       sda_prev;
 reg scl_prev, sda_curr;          //master will always drive this line, so it doesn't matter
 
 reg ack_in_prog;      //For sending acks during read
+reg ack_nack;
+reg en_end_indicator;
+
+reg grab_next_data;
 `endif
 
 //clk_i2c 400KHz is synchronous to i_clk, so no need for 2 reg synchronization chain in other blocks
@@ -135,13 +144,15 @@ always@(posedge i_clk or negedge reset_n) begin
         {addr, rw, sub_addr, sub_len, byte_len, en_scl} <= 0;
         {byte_sent, num_byte_sent, cntr, byte_sr} <= 0;
         {read_sub_addr_sent_flag, data_to_write, data_in_sr} <= 0;
-        ack_in_prog <= 1'b0;
+        {ack_nack, ack_in_prog, en_end_indicator} <= 0;
+        grab_next_data <= 1'b0;
         reg_sda_o <= 1'bz;
 		state <= IDLE;
         next_state <= IDLE;
 	end
 	else begin
         valid_out <= 1'b0;
+        req_data_chunk <= 1'b0;
 		case(state)
             /***
              * State: IDLE
@@ -247,7 +258,7 @@ always@(posedge i_clk or negedge reset_n) begin
                 else begin
                     if(!scl_curr & scl_prev) begin
                         {byte_sent, cntr} <= cntr + 1'b1;       //incr cntr, with overflow being caught
-                        reg_sda_o <=  byte_sr[7];                //send MSB
+                        reg_sda_o <=  byte_sr[7];               //send MSB
                         byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
                     end
                 end
@@ -256,7 +267,9 @@ always@(posedge i_clk or negedge reset_n) begin
             /***
              * State: Reads
              * Purpose: Read 1 byte messages that are set on posedge of i2c_clk
-             * How it Works:
+             * How it Works: Need to read all 8 bits, on posedge of clock. SDA will be
+             *               stable high before this occurs, thus it's fine to grab sda_prev,
+             *               which is synchronous to i_clk. Every 
              */
 			READ: begin
                 if(byte_sent) begin
@@ -265,6 +278,7 @@ always@(posedge i_clk or negedge reset_n) begin
                     valid_out <= 1'b1;          //Let master know valid output
                     state <= ACK_NACK_TX;       //Send ack
                     next_state <= (num_byte_sent == byte_len-1) ? STOP : READ;      //Have we read all bytes?
+                    ack_nack <= num_byte_sent == byte_len-1;                        //If true, then 1, which is a nack
                     num_byte_sent <= num_byte_sent + 1;  //Incr number of bytes read
                     ack_in_prog <= 1'b1;
                 end
@@ -272,22 +286,53 @@ always@(posedge i_clk or negedge reset_n) begin
                     if(!scl_prev & scl_curr) begin
                         valid_out <= 1'b0;
                         {byte_sent, cntr} <= cntr + 1'b1;
-                        data_in_sr <= {data_in_sr[7:1], sda_prev};
+                        data_in_sr <= {data_in_sr[7:1], sda_prev}; //MSB first
                     end
                 end
 			end
 			
+            /***
+             * State: Write
+             * Purpose: Write specified data words starting from address and incrementing by 1
+             * How it Works: Simply send data out 1 byte at a time, with corresponding acks form slave.
+             *               When all bytes are written, quit comms.
+             */
 			WRITE: begin
-			end
-			
-			STOP: begin 
-                if(scl_curr & scl_prev) begin
-                    valid_out <= 1'b0;
-                    state <= IDLE;                              //reset to IDLE
-                    read_sub_addr_sent_flag <= 1'b0;            //reset flag
+                if(byte_sent) begin
+                    byte_sent <= 1'b0;
+                    state <= ACK_NACK_RX;
+                    next_state <= (num_byte_sent == byte_len-1) ? STOP : GRAB_DATA;
+                    num_byte_sent <= num_byte_sent + 1'b1;
+                end
+                else begin
+                    if(!scl_curr & scl_prev) begin //negedge
+                        {byte_sent, cntr} <= cntr + 1'b1;
+                        reg_sda_o <= byte_sr[7];
+                    end
                 end
 			end
             
+            /***
+             * State: GRAB_DATA
+             * Purpose: Grab next 8 bit segment as needed
+             * How it works: dequeue data, then grab the word requested (dequeue is req_data_chunk)
+             */
+            GRAB_DATA: begin
+                if(grab_next_data) begin
+                    req_data_chunk <= 1'b1;
+                    grab_next_data <= 1'b0;
+                else begin
+                    state <= WRITE;
+                    byte_sr <= i_data_write;
+                end
+            end
+            
+            /***
+             * State: ACK_NACK_RX
+             * Purpose: Receive ack_nack from slave
+             * How it works: sda is already freed, simply look at posedges of scl, and look at data
+             *               remember low is considered an ack, and high is a nack
+             */
             ACK_NACK_RX: begin
                 if(!scl_prev & scl_curr) begin
                     if(!sda_prev) begin      //checking for the ack condition (its low)
@@ -297,8 +342,10 @@ always@(posedge i_clk or negedge reset_n) begin
                     else begin
                         $display("%t, rx nack encountered", $time);
                         nack <= 1'b1;
-                        busy <= 1'b0;
-                        state <= IDLE;
+                        //busy <= 1'b0;
+                        //reg_sda_o <= 1'bz;
+                        //en_scl <= 1'b0;
+                        state <= next_state;
                     end  
                 end
             end
@@ -312,7 +359,7 @@ always@(posedge i_clk or negedge reset_n) begin
             ACK_NACK_TX: begin
                 if(!scl_curr & scl_prev) begin      //negedge
                     if(ack_in_prog) begin 
-                        reg_sda_o <= 1'b0;          //write ack until negedge of clk
+                        reg_sda_o <= ack_nack;          //write ack until negedge of clk
                         ack_in_prog <= 1'b0;
                     end
                     else begin
@@ -320,6 +367,36 @@ always@(posedge i_clk or negedge reset_n) begin
                         state <= next_state;
                     end
                 end
+            end
+            
+            /***
+             * State: STOP
+             * Purpose: Pulls bus low on negedge, and waits for scl to be high
+             *          drive sda to high from low, which is stop indication
+             */
+            STOP: begin 
+                if(!scl_curr & scl_prev) begin //negedge
+                    reg_sda_o <= 1'b0;         //Set to low
+                    en_end_indicator <= 1'b1;
+                end
+                
+                if(scl_curr & scl_prev & en_end_indicator) begin
+                    reg_sda_o <= 1'b1;
+                    state <= RELEASE_BUS;
+                    en_end_indicator <= 1'b0;
+                end
+			end
+            
+            /***
+             * State: Release bus
+             * Purpose: Release the bus
+             * How it works: Turn off 400KHz out and release the sda line, go back to idle
+             */
+            RELEASE_BUS: begin
+                en_scl <= 1'b0;
+                state <= IDLE;
+                reg_sda_o <= 1'bz;
+                busy <= 1'b0;
             end
             
 			default:
