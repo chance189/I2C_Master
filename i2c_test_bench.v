@@ -8,7 +8,7 @@
 `timescale 1fs/1fs
 module i2c_test_bench();
 //Slave address of ADT7420
-localparam [6:0] I2C_ADDR = 7'4B;
+localparam [6:0] I2C_ADDR = 7'h4B;
 
 //wires/regs needed for basic operation
 reg [7:0] slave_addr, i_data_write;
@@ -18,8 +18,12 @@ reg request_transmit;
 reg [23:0] i_byte_len;
 wire [7:0] data_out;
 wire valid_out;
-inout scl, sda;
+wire scl;
+wire sda;
 wire req_data_chunk, busy, nack;
+
+//Here for managing sda
+reg en_sda, test_sda;
 
 //Declare debug regs
 `ifdef DEBUG
@@ -47,7 +51,7 @@ wire [15:0] clk_i2c_cntr;
 //For taking a sample of the scl and sda
 wire [1:0] sda_curr;    //So this one is asynchronous especially with replies from the slave, must have synchronization chain of 2
 wire       sda_prev;
-wire scl_prev, sda_curr;          //master will always drive this line, so it doesn't matter
+wire scl_prev, scl_curr;          //master will always drive this line, so it doesn't matter
 
 wire ack_in_prog;      //For sending acks during read
 wire ack_nack;
@@ -62,8 +66,11 @@ initial begin
     forever #(5000000) clk = !clk;  //100MHz clock
 end
 
+assign sda = en_sda ? test_sda : 1'bz;
+
 //run test here
 initial begin
+    en_sda = 0;
     reset_n = 0;
     request_transmit = 1'b0;
     #500;
@@ -76,11 +83,9 @@ initial begin
     i_sub_addr = 8'h2E;
     i_sub_len = 1'b0;
     i_byte_len = 23'd2;
-    @(posedge clk);
     request_transmit <= 1'b1;
-    #10;
+    @(negedge clk);
     request_transmit <= 1'b0;
-    
     @(negedge busy);
     
     $display("Write 2 Bytes Test:");
@@ -93,18 +98,22 @@ initial begin
     request_transmit <= 1'b1;
     #10;
     request_transmit <= 1'b0;
+    @(posedge req_data_chunk);
+    i_data_write <= 8'h07;
     @(negedge busy);
+    
+    $display("Test Finished");
     
 end
 
-i2c_master DUT(.i_clk(clk),				//input clock to the module @100MHz (or whatever crystal you have on the board)
-			   .reset_n(reset_n),			//reset for creating a known start condition
+i2c_master DUT(.i_clk(clk),				        //input clock to the module @100MHz (or whatever crystal you have on the board)
+			   .reset_n(reset_n),			    //reset for creating a known start condition
 			   .i_addr_w_rw(slave_addr),		//7 bit address, LSB is the read write bit, with 0 being write, 1 being read
 			   .i_sub_addr(i_sub_addr),			//contains sub addr to send to slave, partition is decided on bit_sel
                .i_sub_len(i_sub_len),			//denotes whether working with an 8 bit or 16 bit sub_addr, 0 is 8bit, 1 is 16 bit
 			   .i_byte_len(i_byte_len),			//denotes whether a single or sequential read or write will be performed (denotes number of bytes to read or write)
-               .i_data_write(i_data_write),       //Data to write if performing write action
-               .req_trans(request_transmit),          //denotes when to start a new transaction
+               .i_data_write(i_data_write),     //Data to write if performing write action
+               .req_trans(request_transmit),    //denotes when to start a new transaction
                   
                   /** For Reads **/
                .data_out(data_out),
@@ -115,9 +124,9 @@ i2c_master DUT(.i_clk(clk),				//input clock to the module @100MHz (or whatever 
                .sda_o(sda),				//i2c data line, set to 1'bz when not utilized (resistors will pull it high)
                   
                   /** Comms to Master Module **/
-               .req_data_chunk(req_data_chunk)      //Request master to request new data chunk in i_data_write
-               .busy(busy),				//denotes whether module is currently communicating with a slave
-               .nack(nack)                //denotes whether module is encountering a nack from slave (only activates when master is attempting to contact device)
+               .req_data_chunk(req_data_chunk),  //Request master to request new data chunk in i_data_write
+               .busy(busy),				         //denotes whether module is currently communicating with a slave
+               .nack(nack)                       //denotes whether module is encountering a nack from slave (only activates when master is attempting to contact device)
 				  
               `ifdef DEBUG
               ,

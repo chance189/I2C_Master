@@ -32,7 +32,7 @@ module i2c_master(input				i_clk,				//input clock to the module @100MHz (or wha
 				  inout				sda_o,				//i2c data line, set to 1'bz when not utilized (resistors will pull it high)
                   
                   /** Comms to Master Module **/
-                  output reg        req_data_chunk      //Request master to request new data chunk in i_data_write
+                  output reg        req_data_chunk ,    //Request master to request new data chunk in i_data_write
 				  output reg		busy,				//denotes whether module is currently communicating with a slave
                   output reg        nack                //denotes whether module is encountering a nack from slave (only activates when master is attempting to contact device)
 				  
@@ -81,7 +81,7 @@ localparam [3:0] IDLE        = 4'd0,
                  GRAB_DATA   = 4'd6,
 				 ACK_NACK_RX = 4'd7,
                  ACK_NACK_TX = 4'd8,
-				 STOP		 = 4'd9;
+				 STOP		 = 4'd9,
                  RELEASE_BUS = 4'hA;
                  
 localparam [15:0] DIV_100MHZ = 16'd125;     //desire 400KHz, have 100MHz, thus (1/(400*10^3)*100*10^6)/2, note div by 2 is for need to change in cycle
@@ -111,7 +111,7 @@ reg [15:0] clk_i2c_cntr;
 //For taking a sample of the scl and sda
 reg [1:0] sda_curr;    //So this one is asynchronous especially with replies from the slave, must have synchronization chain of 2
 reg       sda_prev;
-reg scl_prev, sda_curr;          //master will always drive this line, so it doesn't matter
+reg scl_prev, scl_curr;          //master will always drive this line, so it doesn't matter
 
 reg ack_in_prog;      //For sending acks during read
 reg ack_nack;
@@ -200,6 +200,7 @@ always@(posedge i_clk or negedge reset_n) begin
                     reg_sda_o <= 1'b0;                       //set start bit for negedge of clock, and toggle for the clock to begin
                     byte_sr <= read_sub_addr_sent_flag ? addr : {addr[7:1], 1'b0};
                     state <= SLAVE_ADDR;
+                    $display("%t, START INDICATION!", $time);
                 end
 			end
             
@@ -219,10 +220,11 @@ always@(posedge i_clk or negedge reset_n) begin
                     state <= ACK_NACK_RX;                   //await for nack_ack
                     reg_sda_o <= 1'bz;                      //release sda line
                     cntr <= 0;
+                    $display("%t, SLAVE_ADDR SENT!", $time);
                 end
                 else begin
                     if(!scl_curr & scl_prev) begin
-                        {byte_sent, cntr} <= cntr + 1'b1;       //incr cntr, with overflow being caught (due to overflow, no need to set cntr to 0)
+                        {byte_sent, cntr} <= {byte_sent, cntr} + 1;       //incr cntr, with overflow being caught (due to overflow, no need to set cntr to 0)
                         reg_sda_o <= byte_sr[7];                //send MSB
                         byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
                     end
@@ -244,12 +246,14 @@ always@(posedge i_clk or negedge reset_n) begin
                         next_state <= SUB_ADDR;
                         sub_len <= 1'b0;                    //denote only want 8 bit next time
                         byte_sr <= sub_addr[7:0];           //set the byte shift register
+                        $display("%t, MSB OF SUB ADDR SENT", $time);
                     end
                     else begin
                         next_state <= rw ? START : WRITE;   //move to appropriate state
                         byte_sr <= rw ? byte_sr : data_to_write; //if write, want to setup the data to write to device
                         read_sub_addr_sent_flag <= 1'b1;    //For dictating state of machine
                         en_scl <= 1'b0;
+                        $display("%t, SUB ADDR SENT", $time);
                     end
                     
                     cntr <= 0;
@@ -259,7 +263,7 @@ always@(posedge i_clk or negedge reset_n) begin
                 end
                 else begin
                     if(!scl_curr & scl_prev) begin
-                        {byte_sent, cntr} <= cntr + 1'b1;       //incr cntr, with overflow being caught
+                        {byte_sent, cntr} <= {byte_sent, cntr} + 1;       //incr cntr, with overflow being caught
                         reg_sda_o <=  byte_sr[7];               //send MSB
                         byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
                     end
@@ -283,11 +287,12 @@ always@(posedge i_clk or negedge reset_n) begin
                     ack_nack <= num_byte_sent == byte_len-1;                        //If true, then 1, which is a nack
                     num_byte_sent <= num_byte_sent + 1;  //Incr number of bytes read
                     ack_in_prog <= 1'b1;
+                    $display("%t, READ BYTE #%d SENT!", $time, num_byte_sent);
                 end
                 else begin
                     if(!scl_prev & scl_curr) begin
                         valid_out <= 1'b0;
-                        {byte_sent, cntr} <= cntr + 1'b1;
+                        {byte_sent, cntr} <= cntr + 1;
                         data_in_sr <= {data_in_sr[7:1], sda_prev}; //MSB first
                     end
                 end
@@ -307,10 +312,12 @@ always@(posedge i_clk or negedge reset_n) begin
                     reg_sda_o <= 1'bz;
                     next_state <= (num_byte_sent == byte_len-1) ? STOP : GRAB_DATA;
                     num_byte_sent <= num_byte_sent + 1'b1;
+                    grab_next_data <= 1'b1;
+                    $display("%t, WRITE BYTE #%d SENT!", $time, num_byte_sent);
                 end
                 else begin
                     if(!scl_curr & scl_prev) begin //negedge
-                        {byte_sent, cntr} <= cntr + 1'b1;
+                        {byte_sent, cntr} <= {byte_sent, cntr} + 1;
                         reg_sda_o <= byte_sr[7];
                     end
                 end
@@ -325,6 +332,7 @@ always@(posedge i_clk or negedge reset_n) begin
                 if(grab_next_data) begin
                     req_data_chunk <= 1'b1;
                     grab_next_data <= 1'b0;
+                end
                 else begin
                     state <= WRITE;
                     byte_sr <= i_data_write;
