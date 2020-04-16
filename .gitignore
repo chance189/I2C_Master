@@ -1,3 +1,9 @@
+#For Modelsim files
+*.mti
+*.mpf
+*.wlf
+work/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
