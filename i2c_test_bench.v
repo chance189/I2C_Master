@@ -22,8 +22,11 @@ wire scl;
 wire sda;
 wire req_data_chunk, busy, nack;
 
-//Here for managing sda
-reg en_sda, test_sda;
+//Values for testing data
+reg en_sda, test_sda, test_sda_prev;
+reg start_ind, stop_ind;
+reg [3:0] signal_cntr;
+reg [7:0] test_data_in;
 
 //Declare debug regs
 `ifdef DEBUG
@@ -68,6 +71,7 @@ end
 
 assign sda = en_sda ? test_sda : 1'bz;
 
+integer i;
 //run test here
 initial begin
     en_sda = 0;
@@ -75,6 +79,95 @@ initial begin
     request_transmit = 1'b0;
     #500;
     reset_n = 1;
+    
+    $display("Write 2 Bytes Test:");
+    slave_addr = {I2C_ADDR, 1'b0};
+    i_data_write = 8'hFE;
+    i_sub_addr = 8'h2E;
+    i_sub_len = 1'b0;
+    i_byte_len = 23'd2;
+    @(posedge clk);
+    request_transmit <= 1'b1;
+    
+    //Now await a start indication
+    @(posedge busy);
+    $display("Requisition Granted!");
+    request_transmit = 1'b0;
+    
+    @(posedge start_ind);
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("SLAVE ADDR: %b", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab sub addr
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Sub Addr MSB: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Grab Byte 1 for write
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written, Byte 1: %b", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab sub addr
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written Byte 2: %b", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    @(posedge stop_ind);
+    $display("%t, STOP INDICATION! Finished Write of 2 Bytes", $time);
+    
+    //Now we are doing a write, so we just need to grab slave addr,
+    //Then the 8 bit sub addr (simulating only needing 8 bit for this one)
+    //And then parse the data sent
+    request_transmit <= 1'b0;
+    @(posedge req_data_chunk);
+    i_data_write <= 8'h07;
+    @(negedge busy);
     
     $display("Read_2 Bytes Test:");
     //Do read test of 16bit address
@@ -86,24 +179,25 @@ initial begin
     request_transmit <= 1'b1;
     @(negedge clk);
     request_transmit <= 1'b0;
-    @(negedge busy);
     
-    $display("Write 2 Bytes Test:");
-    slave_addr = {I2C_ADDR, 1'b0};
-    i_data_write = 8'hFE;
-    i_sub_addr = 8'h2E;
-    i_sub_len = 1'b0;
-    i_byte_len = 23'd2;
-    @(posedge clk);
-    request_transmit <= 1'b1;
-    #10;
-    request_transmit <= 1'b0;
-    @(posedge req_data_chunk);
-    i_data_write <= 8'h07;
+    //Acknowledge
+    
     @(negedge busy);
     
     $display("Test Finished");
     
+end
+
+//Assigning for sda previous in testbench, and determining start and stop signals
+always@(posedge clk or negedge reset_n) begin
+    if(!reset_n) begin
+        {start_ind, stop_ind, test_sda_prev} <= 0;
+    end
+    else begin
+        test_sda_prev <= sda_prev;
+        start_ind <= test_sda_prev & !sda & scl;  //If scl is high and there was a change in sda (high to low) then start
+        stop_ind <= !test_sda_prev & sda & scl;   //reverse of above
+    end
 end
 
 i2c_master DUT(.i_clk(clk),				        //input clock to the module @100MHz (or whatever crystal you have on the board)

@@ -6,6 +6,8 @@
  *          to the clock divider.
  *
  * Notes:	* For writing, this module expects the number of reads and writes to be explicit, i.e, how long until termination
+ *          * Note that all $display is non-sythesizable, and is removed during synthesis, no need to comment out
+ *          * Second Note: This code doesn't currently monitor if the lines are busy, therefore not multimaster friendly
  * 
  * How it works: The input clock is 100MHz for this module, and the output scl is tied to the clock line only during transmission
  *				 SDA line only changes on negedge of 400kHz clock
@@ -175,6 +177,7 @@ always@(posedge i_clk or negedge reset_n) begin
                     sub_addr <= i_sub_len ? i_sub_addr : {i_sub_addr[7:0], 8'b0};
                     sub_len <= i_sub_len;
                     data_to_write <= i_data_write;
+                    byte_len <= i_byte_len;
 
                     //begin the 400kHz generation                    
                     en_scl <= 1'b1;
@@ -197,7 +200,7 @@ always@(posedge i_clk or negedge reset_n) begin
              */
 			START: begin
                 if(scl_prev & scl_curr) begin               //check that scl is high
-                    reg_sda_o <= 1'b0;                       //set start bit for negedge of clock, and toggle for the clock to begin
+                    reg_sda_o <= 1'b0;                      //set start bit for negedge of clock, and toggle for the clock to begin
                     byte_sr <= read_sub_addr_sent_flag ? addr : {addr[7:1], 1'b0};
                     state <= SLAVE_ADDR;
                     $display("%t, START INDICATION!", $time);
@@ -252,7 +255,6 @@ always@(posedge i_clk or negedge reset_n) begin
                         next_state <= rw ? START : WRITE;   //move to appropriate state
                         byte_sr <= rw ? byte_sr : data_to_write; //if write, want to setup the data to write to device
                         read_sub_addr_sent_flag <= 1'b1;    //For dictating state of machine
-                        en_scl <= 1'b0;
                         $display("%t, SUB ADDR SENT", $time);
                     end
                     
@@ -305,7 +307,7 @@ always@(posedge i_clk or negedge reset_n) begin
              *               When all bytes are written, quit comms.
              */
 			WRITE: begin
-                if(byte_sent & cntr[1]) begin
+                if(byte_sent & cntr[0]) begin
                     cntr <= 0;
                     byte_sent <= 1'b0;
                     state <= ACK_NACK_RX;
@@ -319,6 +321,7 @@ always@(posedge i_clk or negedge reset_n) begin
                     if(!scl_curr & scl_prev) begin //negedge
                         {byte_sent, cntr} <= {byte_sent, cntr} + 1;
                         reg_sda_o <= byte_sr[7];
+                        byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
                     end
                 end
 			end
@@ -349,7 +352,7 @@ always@(posedge i_clk or negedge reset_n) begin
                 if(!scl_prev & scl_curr) begin
                     if(!sda_prev) begin      //checking for the ack condition (its low)
                         state <= next_state;
-                        $display("$t, rx ack encountered", $time);
+                        $display("%t, rx ack encountered", $time);
                     end
                     else begin
                         $display("%t, rx nack encountered", $time);
