@@ -26,7 +26,7 @@ wire req_data_chunk, busy, nack;
 reg en_sda, test_sda, test_sda_prev;
 reg start_ind, stop_ind;
 reg [3:0] signal_cntr;
-reg [7:0] test_data_in;
+reg [7:0] test_data_in, test_data_out;
 
 //Declare debug regs
 `ifdef DEBUG
@@ -52,15 +52,15 @@ wire clk_i2c;
 wire [15:0] clk_i2c_cntr;
 
 //For taking a sample of the scl and sda
-wire [1:0] sda_curr;    //So this one is asynchronous especially with replies from the slave, must have synchronization chain of 2
+wire [1:0] sda_curr;       //So this one is asynchronous especially with replies from the slave, must have synchronization chain of 2
 wire       sda_prev;
-wire scl_prev, scl_curr;          //master will always drive this line, so it doesn't matter
+wire scl_prev, scl_curr;   //master will always drive this line, so it doesn't matter
 
-wire ack_in_prog;      //For sending acks during read
+wire ack_in_prog;          //For sending acks during read
 wire ack_nack;
 wire en_end_indicator;
 
-wire grab_next_data;
+wire grab_next_data, scl_is_high;
 `endif
 
 //Here do 100MHz clock
@@ -77,8 +77,11 @@ initial begin
     en_sda = 0;
     reset_n = 0;
     request_transmit = 1'b0;
+    test_data_in = 0;
+    test_data_out = 8'hBE;
     #500;
     reset_n = 1;
+    #10000;
     
     $display("Write 2 Bytes Test:");
     slave_addr = {I2C_ADDR, 1'b0};
@@ -101,7 +104,7 @@ initial begin
         test_data_in[i] = sda;
     end
     $display("SLAVE ADDR: %b", test_data_in);
-    
+    $display("Desired action: %s", test_data_in[0] ? "READ" : "WRITE");
     @(negedge scl);
     #10;
     en_sda = 1;
@@ -132,8 +135,67 @@ initial begin
         #1;
         test_data_in[i] = sda;
     end
-    $display("Data Written, Byte 1: %b", test_data_in);
+    $display("Data Written, Byte 1: %h", test_data_in);
     
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    //This will be found between the two negedges
+    @(posedge req_data_chunk);
+    i_data_write <= 8'h07;
+    
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab byte 2
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written Byte 2: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    @(posedge stop_ind);
+    $display("%t, STOP INDICATION! Finished Write of 2 Bytes", $time);
+    
+    //Test read next
+    $display("Read_2 Bytes Test:");
+    //Do read test of 16bit address
+    slave_addr = {I2C_ADDR, 1'b1};
+    i_data_write = 8'hFE;
+    i_sub_addr = 8'h2E;
+    i_sub_len = 1'b0;
+    i_byte_len = 23'd2;
+    
+    //Await for clock for requesting new data to transmit
+     @(posedge clk);
+    request_transmit <= 1'b1;
+    
+    //Now await a start indication
+    @(posedge busy);
+    $display("Requisition Granted!");
+    request_transmit = 1'b0;
+    
+    @(posedge start_ind);
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("SLAVE ADDR: %b", test_data_in);
+    $display("Desired action: %s", test_data_in[0] ? "READ" : "WRITE");
+    
+    //Reply Ack
     @(negedge scl);
     #10;
     en_sda = 1;
@@ -148,7 +210,7 @@ initial begin
         #1;
         test_data_in[i] = sda;
     end
-    $display("Data Written Byte 2: %b", test_data_in);
+    $display("Sub Addr MSB: %h", test_data_in);
     
     @(negedge scl);
     #10;
@@ -158,34 +220,52 @@ initial begin
     #10;
     en_sda = 0;
     
+    @(posedge start_ind);
+    $display("REPEAT START RECEIVED!");
+    
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("SLAVE ADDR: %b", test_data_in);
+    $display("Desired action: %s", test_data_in[0] ? "READ" : "WRITE");
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    
+    //Take control of SDA and ensure master can read data
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(negedge scl);
+        #1;
+        test_sda = test_data_out[i];
+    end
+    
+    @(negedge scl);
+    en_sda = 0;
+    
+    @(posedge scl);
+    $display("RECEIVED: %s", sda ? "NACK" : "ACK");
+    
+        //Take control of SDA and ensure master can read data
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(negedge scl);
+        #1;
+        test_sda = test_data_out[i];
+    end
+    
+    @(negedge scl);
+    en_sda = 0;
+    
+    @(posedge scl);
+    $display("RECEIVED: %s", sda ? "NACK" : "ACK");
+    
     @(posedge stop_ind);
-    $display("%t, STOP INDICATION! Finished Write of 2 Bytes", $time);
-    
-    //Now we are doing a write, so we just need to grab slave addr,
-    //Then the 8 bit sub addr (simulating only needing 8 bit for this one)
-    //And then parse the data sent
-    request_transmit <= 1'b0;
-    @(posedge req_data_chunk);
-    i_data_write <= 8'h07;
-    @(negedge busy);
-    
-    $display("Read_2 Bytes Test:");
-    //Do read test of 16bit address
-    slave_addr = {I2C_ADDR, 1'b1};
-    i_data_write = 8'hFE;
-    i_sub_addr = 8'h2E;
-    i_sub_len = 1'b0;
-    i_byte_len = 23'd2;
-    request_transmit <= 1'b1;
-    @(negedge clk);
-    request_transmit <= 1'b0;
-    
-    //Acknowledge
-    
-    @(negedge busy);
+    $display("%t, STOP INDICATION! Finished read of 2 bytes", $time);
     
     $display("Test Finished");
-    
 end
 
 //Assigning for sda previous in testbench, and determining start and stop signals
@@ -200,12 +280,12 @@ always@(posedge clk or negedge reset_n) begin
     end
 end
 
-i2c_master DUT(.i_clk(clk),				        //input clock to the module @100MHz (or whatever crystal you have on the board)
-			   .reset_n(reset_n),			    //reset for creating a known start condition
-			   .i_addr_w_rw(slave_addr),		//7 bit address, LSB is the read write bit, with 0 being write, 1 being read
-			   .i_sub_addr(i_sub_addr),			//contains sub addr to send to slave, partition is decided on bit_sel
-               .i_sub_len(i_sub_len),			//denotes whether working with an 8 bit or 16 bit sub_addr, 0 is 8bit, 1 is 16 bit
-			   .i_byte_len(i_byte_len),			//denotes whether a single or sequential read or write will be performed (denotes number of bytes to read or write)
+i2c_master DUT(.i_clk(clk),                     //input clock to the module @100MHz (or whatever crystal you have on the board)
+               .reset_n(reset_n),               //reset for creating a known start condition
+               .i_addr_w_rw(slave_addr),        //7 bit address, LSB is the read write bit, with 0 being write, 1 being read
+               .i_sub_addr(i_sub_addr),         //contains sub addr to send to slave, partition is decided on bit_sel
+               .i_sub_len(i_sub_len),           //denotes whether working with an 8 bit or 16 bit sub_addr, 0 is 8bit, 1 is 16 bit
+               .i_byte_len(i_byte_len),         //denotes whether a single or sequential read or write will be performed (denotes number of bytes to read or write)
                .i_data_write(i_data_write),     //Data to write if performing write action
                .req_trans(request_transmit),    //denotes when to start a new transaction
                   
@@ -214,14 +294,14 @@ i2c_master DUT(.i_clk(clk),				        //input clock to the module @100MHz (or w
                .valid_out(valid_out),
                   
                   /** I2C Lines **/
-               .scl_o(scl),			    //i2c clck line, output by this module, 400 kHz
-               .sda_o(sda),				//i2c data line, set to 1'bz when not utilized (resistors will pull it high)
+               .scl_o(scl),             //i2c clck line, output by this module, 400 kHz
+               .sda_o(sda),             //i2c data line, set to 1'bz when not utilized (resistors will pull it high)
                   
                   /** Comms to Master Module **/
                .req_data_chunk(req_data_chunk),  //Request master to request new data chunk in i_data_write
-               .busy(busy),				         //denotes whether module is currently communicating with a slave
+               .busy(busy),                      //denotes whether module is currently communicating with a slave
                .nack(nack)                       //denotes whether module is encountering a nack from slave (only activates when master is attempting to contact device)
-				  
+                  
               `ifdef DEBUG
               ,
               .state(state),
@@ -253,7 +333,8 @@ i2c_master DUT(.i_clk(clk),				        //input clock to the module @100MHz (or w
               .ack_in_prog(ack_in_prog),
               .ack_nack(ack_nack),
               .en_end_indicator(en_end_indicator),
-              .grab_next_data(grab_next_data)
+              .grab_next_data(grab_next_data),
+              .scl_is_high(scl_is_high)
               `endif
               );
 
