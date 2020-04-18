@@ -4,7 +4,7 @@
  * Date: 4/11/2020
  * Note: For this project, target is 400kHz I2C communication to communicate with an ADT7420
  */
-`define DEBUG
+//`define DEBUG
 `timescale 1fs/1fs
 module i2c_test_bench();
 //Slave address of ADT7420
@@ -428,7 +428,7 @@ always@(posedge clk or negedge reset_n) begin
         {start_ind, stop_ind, test_sda_prev} <= 0;
     end
     else begin
-        test_sda_prev <= sda_prev;
+        test_sda_prev <= sda;
         start_ind <= test_sda_prev & !sda & scl;  //If scl is high and there was a change in sda (high to low) then start
         stop_ind <= !test_sda_prev & sda & scl;   //reverse of above
     end
