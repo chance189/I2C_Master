@@ -25,7 +25,6 @@ wire req_data_chunk, busy, nack;
 //Values for testing data
 reg en_sda, test_sda, test_sda_prev;
 reg start_ind, stop_ind;
-reg [3:0] signal_cntr;
 reg [7:0] test_data_in, test_data_out;
 
 //Declare debug regs
@@ -60,7 +59,7 @@ wire ack_in_prog;          //For sending acks during read
 wire ack_nack;
 wire en_end_indicator;
 
-wire grab_next_data, scl_is_high;
+wire grab_next_data, scl_is_high, scl_is_low;
 `endif
 
 //Here do 100MHz clock
@@ -167,6 +166,8 @@ initial begin
     
     @(posedge stop_ind);
     $display("%t, STOP INDICATION! Finished Write of 2 Bytes", $time);
+    @(negedge busy);
+    $display("Let go of bus");
     
     //Test read next
     $display("Read_2 Bytes Test:");
@@ -248,9 +249,13 @@ initial begin
     
     @(posedge scl);
     $display("RECEIVED: %s", sda ? "NACK" : "ACK");
+    test_data_out = 8'hEF;
+    @(negedge scl);
+    en_sda = 1;
+    test_sda = test_data_out[7];
     
-        //Take control of SDA and ensure master can read data
-    for(i = 7; i >= 0; i = i - 1) begin
+    //Take control of SDA and ensure master can read data
+    for(i = 6; i >= 0; i = i - 1) begin
         @(negedge scl);
         #1;
         test_sda = test_data_out[i];
@@ -265,6 +270,8 @@ initial begin
     @(posedge stop_ind);
     $display("%t, STOP INDICATION! Finished read of 2 bytes", $time);
     
+    @(negedge busy);
+    $display("Let go of bus");
     $display("Test Finished");
 end
 
@@ -334,7 +341,8 @@ i2c_master DUT(.i_clk(clk),                     //input clock to the module @100
               .ack_nack(ack_nack),
               .en_end_indicator(en_end_indicator),
               .grab_next_data(grab_next_data),
-              .scl_is_high(scl_is_high)
+              .scl_is_high(scl_is_high),
+              .scl_is_low(scl_is_low)
               `endif
               );
 

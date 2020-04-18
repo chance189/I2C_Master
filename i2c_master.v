@@ -43,7 +43,7 @@ module i2c_master(input             i_clk,              //input clock to the mod
                   inout             sda_o,              //i2c data line, set to 1'bz when not utilized (resistors will pull it high)
                   
                   /** Comms to Master Module **/
-                  output reg        req_data_chunk ,    //Request master to request new data chunk in i_data_write
+                  output reg        req_data_chunk ,    //Request master to send new data chunk in i_data_write
                   output reg        busy,               //denotes whether module is currently communicating with a slave
                   output reg        nack                //denotes whether module is encountering a nack from slave (only activates when master is attempting to contact device)
                   
@@ -79,10 +79,12 @@ module i2c_master(input             i_clk,              //input clock to the mod
                   output reg        ack_nack,
                   output reg        en_end_indicator,
                   output reg        grab_next_data,
-                  output reg        scl_is_high
+                  output reg        scl_is_high,
+                  output reg        scl_is_low
                   `endif
                   );
-                  
+
+//For state machine                 
 localparam [3:0] IDLE        = 4'd0,
                  START       = 4'd1,
                  RESTART     = 4'd2,
@@ -97,8 +99,14 @@ localparam [3:0] IDLE        = 4'd0,
                  STOP        = 4'hA,
                  RELEASE_BUS = 4'hB;
                  
-localparam [15:0] DIV_100MHZ = 16'd125;     //desire 400KHz, have 100MHz, thus (1/(400*10^3)*100*10^6)/2, note div by 2 is for need to change in cycle
-
+//Modify These Parameters for other targets
+localparam [15:0] DIV_100MHZ = 16'd125;         //desire 400KHz, have 100MHz, thus (1/(400*10^3)*100*10^6)/2, note div by 2 is for need to change in cycle
+localparam [7:0]  START_IND_SETUP  = 60,  //Time before negedge of scl
+                  START_IND_HOLD   = 60,  //Time after posedge of clock when start occurs (not used)
+                  DATA_SETUP_TIME  =  2,  //Time needed before posedge of scl 
+                  DATA_HOLD_TIME   =  3,  //Time after negedge that scl is held
+                  STOP_IND_SETUP   = 60;  //Time after posedge of scl before stop occurs
+                  
 `ifndef DEBUG
 reg [3:0]  state;
 reg [3:0]  next_state;
@@ -132,6 +140,7 @@ reg en_end_indicator;
 
 reg grab_next_data;
 reg scl_is_high;
+reg scl_is_low;
 `endif
 
 //clk_i2c 400KHz is synchronous to i_clk, so no need for 2 reg synchronization chain in other blocks
@@ -159,7 +168,7 @@ always@(posedge i_clk or negedge reset_n) begin
         {byte_sent, num_byte_sent, cntr, byte_sr} <= 0;
         {read_sub_addr_sent_flag, data_to_write, data_in_sr} <= 0;
         {ack_nack, ack_in_prog, en_end_indicator} <= 0;
-        {scl_is_high, grab_next_data} <= 0;
+        {scl_is_high, scl_is_low, grab_next_data} <= 0;
         reg_sda_o <= 1'bz;
         state <= IDLE;
         next_state <= IDLE;
@@ -212,11 +221,11 @@ always@(posedge i_clk or negedge reset_n) begin
              *               even if it was a write, it does not matter.
              */
             START: begin
-                if(scl_prev & scl_curr) begin               //check that scl is high
-                    reg_sda_o <= 1'b0;                      //set start bit for negedge of clock, and toggle for the clock to begin
-                    byte_sr <= {addr[7:1], 1'b0};           //Don't need to check read or write, will always have write in a read request as well
+                if(scl_prev & scl_curr & clk_i2c_cntr == START_IND_SETUP) begin   //check that scl is high, and that a necessary wait time is held
+                    reg_sda_o <= 1'b0;                                       //set start bit for negedge of clock, and toggle for the clock to begin
+                    byte_sr <= {addr[7:1], 1'b0};                            //Don't need to check read or write, will always have write in a read request as well
                     state <= SLAVE_ADDR;
-                    $display("%t, START INDICATION!", $time);
+                    $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: START INDICATION!", $time);
                 end
             end
             
@@ -235,7 +244,7 @@ always@(posedge i_clk or negedge reset_n) begin
                 end
                 
                 if(scl_is_high) begin
-                    if(clk_i2c_cntr[4]) begin
+                    if(clk_i2c_cntr == START_IND_SETUP) begin   //Must wait minimum setup time
                         scl_is_high <= 1'b0;
                         reg_sda_o <= 1'b0;
                         state <= SLAVE_ADDR;
@@ -249,7 +258,7 @@ always@(posedge i_clk or negedge reset_n) begin
              * Purpose: Write slave addr and based on state of system, move to sub_addr or read
              * How it works: We know that this state will go to either read or to writing the sub addr.
              *               If we reach this state again, the flag will be set, and we know we are performing
-             *               a read.
+             *               a read. The setup time is inconsequential, simply need to account for hold time
              */
             SLAVE_ADDR: begin
                 //When scl has fallen, we can change sda 
@@ -260,13 +269,20 @@ always@(posedge i_clk or negedge reset_n) begin
                     state <= ACK_NACK_RX;                   //await for nack_ack
                     reg_sda_o <= 1'bz;                      //release sda line
                     cntr <= 0;
-                    $display("%t, SLAVE_ADDR SENT!", $time);
+                    $display("DUT: I2C MASTER | TIMESTAP: %t | MESSAGE: SLAVE_ADDR SENT!", $time);
                 end
                 else begin
                     if(!scl_curr & scl_prev) begin
-                        {byte_sent, cntr} <= {byte_sent, cntr} + 1;       //incr cntr, with overflow being caught (due to overflow, no need to set cntr to 0)
-                        reg_sda_o <= byte_sr[7];                //send MSB
-                        byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
+                        scl_is_low <= 1'b1;
+                    end
+                    
+                    if(scl_is_low) begin
+                        if(clk_i2c_cntr == DATA_HOLD_TIME) begin
+                            {byte_sent, cntr} <= {byte_sent, cntr} + 1;       //incr cntr, with overflow being caught (due to overflow, no need to set cntr to 0)
+                            reg_sda_o <= byte_sr[7];                //send MSB
+                            byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
+                            scl_is_low <= 1'b0;
+                        end
                     end
                 end
             end
@@ -286,13 +302,13 @@ always@(posedge i_clk or negedge reset_n) begin
                         next_state <= SUB_ADDR;
                         sub_len <= 1'b0;                    //denote only want 8 bit next time
                         byte_sr <= sub_addr[7:0];           //set the byte shift register
-                        $display("%t, MSB OF SUB ADDR SENT", $time);
+                        $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: MSB OF SUB ADDR SENT", $time);
                     end
                     else begin
                         next_state <= rw ? RESTART : WRITE;   //move to appropriate state
                         byte_sr <= rw ? byte_sr : data_to_write; //if write, want to setup the data to write to device
                         read_sub_addr_sent_flag <= 1'b1;    //For dictating state of machine
-                        $display("%t, SUB ADDR SENT", $time);
+                        $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: SUB ADDR SENT", $time);
                     end
                     
                     cntr <= 0;
@@ -302,9 +318,16 @@ always@(posedge i_clk or negedge reset_n) begin
                 end
                 else begin
                     if(!scl_curr & scl_prev) begin
-                        {byte_sent, cntr} <= {byte_sent, cntr} + 1;       //incr cntr, with overflow being caught
-                        reg_sda_o <=  byte_sr[7];               //send MSB
-                        byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
+                        scl_is_low <= 1'b1;
+                    end
+                    
+                    if(scl_is_low) begin
+                        if(clk_i2c_cntr == DATA_HOLD_TIME) begin
+                            scl_is_low <= 1'b0;
+                            {byte_sent, cntr} <= {byte_sent, cntr} + 1;       //incr cntr, with overflow being caught
+                            reg_sda_o <=  byte_sr[7];               //send MSB
+                            byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
+                        end
                     end
                 end
             end
@@ -326,13 +349,20 @@ always@(posedge i_clk or negedge reset_n) begin
                     ack_nack <= num_byte_sent == byte_len-1;                        //If true, then 1, which is a nack
                     num_byte_sent <= num_byte_sent + 1;  //Incr number of bytes read
                     ack_in_prog <= 1'b1;
-                    $display("%t, READ BYTE #%d SENT!", $time, num_byte_sent);
+                    $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: READ BYTE #%d SENT!", $time, num_byte_sent);
                 end
                 else begin
                     if(!scl_prev & scl_curr) begin
-                        valid_out <= 1'b0;
-                        {byte_sent, cntr} <= cntr + 1;
-                        data_in_sr <= {data_in_sr[7:1], sda_prev}; //MSB first
+                        scl_is_high <= 1'b1;
+                    end
+                    
+                    if(scl_is_high) begin
+                        if(clk_i2c_cntr == START_IND_SETUP) begin
+                            valid_out <= 1'b0;
+                            {byte_sent, cntr} <= cntr + 1;
+                            data_in_sr <= {data_in_sr[6:0], sda_prev}; //MSB first
+                            scl_is_high <= 1'b0;
+                        end
                     end
                 end
             end
@@ -352,13 +382,20 @@ always@(posedge i_clk or negedge reset_n) begin
                     next_state <= (num_byte_sent == byte_len-1) ? STOP : GRAB_DATA;
                     num_byte_sent <= num_byte_sent + 1'b1;
                     grab_next_data <= 1'b1;
-                    $display("%t, WRITE BYTE #%d SENT!", $time, num_byte_sent);
+                    $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: WRITE BYTE #%d SENT!", $time, num_byte_sent);
                 end
                 else begin
-                    if(!scl_curr & scl_prev) begin //negedge
-                        {byte_sent, cntr} <= {byte_sent, cntr} + 1;
-                        reg_sda_o <= byte_sr[7];
-                        byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
+                    if(!scl_curr & scl_prev) begin
+                        scl_is_low <= 1'b1;
+                    end
+                    
+                    if(scl_is_low) begin //negedge
+                        if(clk_i2c_cntr == DATA_HOLD_TIME) begin
+                            {byte_sent, cntr} <= {byte_sent, cntr} + 1;
+                            reg_sda_o <= byte_sr[7];
+                            byte_sr <= {byte_sr[6:0], 1'b0};        //shift out MSB
+                            scl_is_low <= 1'b0;
+                        end
                     end
                 end
             end
@@ -389,10 +426,10 @@ always@(posedge i_clk or negedge reset_n) begin
                 if(!scl_prev & scl_curr) begin
                     if(!sda_prev) begin      //checking for the ack condition (its low)
                         state <= next_state;
-                        $display("%t, rx ack encountered", $time);
+                        $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: rx ack encountered", $time);
                     end
                     else begin
-                        $display("%t, rx nack encountered", $time);
+                        $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: rx nack encountered", $time);
                         nack <= 1'b1;
                         //busy <= 1'b0;
                         //reg_sda_o <= 1'bz;
@@ -415,7 +452,8 @@ always@(posedge i_clk or negedge reset_n) begin
                         ack_in_prog <= 1'b0;
                     end
                     else begin
-                        reg_sda_o <= 1'bz;
+                        reg_sda_o <= next_state == STOP ? 1'b0 : 1'bz;
+                        en_end_indicator <= next_state == STOP ? 1'b1 : en_end_indicator;
                         state <= next_state;
                     end
                 end
@@ -427,15 +465,23 @@ always@(posedge i_clk or negedge reset_n) begin
              *          drive sda to high from low, which is stop indication
              */
             STOP: begin 
-                if(!scl_curr & scl_prev) begin //negedge
+                if(!scl_curr & scl_prev & !rw) begin //negedge only if we are writing
                     reg_sda_o <= 1'b0;         //Set to low
                     en_end_indicator <= 1'b1;
                 end
                 
+                //Note addition of counter, needed to ensure that there is enough delay for target device
                 if(scl_curr & scl_prev & en_end_indicator) begin
-                    reg_sda_o <= 1'b1;
-                    state <= RELEASE_BUS;
+                    scl_is_high <= 1'b1;
                     en_end_indicator <= 1'b0;
+                end
+                
+                if(scl_is_high) begin
+                    if(clk_i2c_cntr == STOP_IND_SETUP) begin
+                        reg_sda_o <= 1'b1;
+                        state <= RELEASE_BUS;
+                        scl_is_high <= 1'b0;
+                    end
                 end
             end
             
@@ -445,10 +491,12 @@ always@(posedge i_clk or negedge reset_n) begin
              * How it works: Turn off 400KHz out and release the sda line, go back to idle
              */
             RELEASE_BUS: begin
-                en_scl <= 1'b0;
-                state <= IDLE;
-                reg_sda_o <= 1'bz;
-                busy <= 1'b0;
+                if(clk_i2c_cntr == DIV_100MHZ-3) begin
+                    en_scl <= 1'b0;
+                    state <= IDLE;
+                    reg_sda_o <= 1'bz;
+                    busy <= 1'b0;
+                end
             end
             
             default:
