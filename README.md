@@ -10,12 +10,15 @@ For more in depth information of I2C, please lookup Texas Instruments "Understan
 ### Getting Started/How to use
 
 The current verilog module is targeted to meet the minimum requirements of the ADT7420 Temperature sensor. The specifications for timing requirements can be found in this IC's specification sheet.
-For a bus with multiple slaves, find the slowest item on the bus, and ensure that the minum setup and hold times will be met by the module. These are defined in a localparam at the beginning of the file.
+For a bus with multiple slaves, find the slowest item on the bus, and ensure that the minimum setup and hold times will be met by the module. These are defined in a localparam at the beginning of the file.
+Additionally, this module is targeted for scl of 400KHz, if your target cannot reach this speed, you must modify the clock generation of the module. If the subsequent divisor is a fraction, look up a fractional clock divider.
 
 ### Simulation Results
 
 The simulation can be run using ModelSim from Altera, or using Xilinx's Vivado testbench. The testbench included in this file runs through multiple byte reads, and writes, included slave addresses that are up to 16 bits.
 Make modification as necessary for your use case.
+
+To see all internal registers, uncomment the "\`define DEBUG" at the top of both the test bench and the other file.
 
 ### Verification on Nexys 4 DDR
 

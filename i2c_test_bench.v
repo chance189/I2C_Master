@@ -73,6 +73,7 @@ assign sda = en_sda ? test_sda : 1'bz;
 integer i;
 //run test here
 initial begin
+    /************** Setup of test *****************/
     en_sda = 0;
     reset_n = 0;
     request_transmit = 1'b0;
@@ -82,7 +83,8 @@ initial begin
     reset_n = 1;
     #10000;
     
-    $display("Write 2 Bytes Test:");
+    /****** 8 bit Sub addr, and 2 byte write ******/
+    $display("******** Write 2 Bytes Test: ********");
     slave_addr = {I2C_ADDR, 1'b0};
     i_data_write = 8'hFE;
     i_sub_addr = 8'h2E;
@@ -169,8 +171,8 @@ initial begin
     @(negedge busy);
     $display("Let go of bus");
     
-    //Test read next
-    $display("Read_2 Bytes Test:");
+    /****** 8 bit Sub addr, and 2 byte read ******/
+    $display("******** Read_2 Bytes Test: ********");
     //Do read test of 16bit address
     slave_addr = {I2C_ADDR, 1'b1};
     i_data_write = 8'hFE;
@@ -272,7 +274,152 @@ initial begin
     
     @(negedge busy);
     $display("Let go of bus");
-    $display("Test Finished");
+    
+    /****** 16 bit Sub addr, and 4 byte write ******/
+    $display("******** Write 3 Bytes Test, 16 bit sub addr: ********");
+    slave_addr = {7'h3A, 1'b0};
+    i_data_write = 8'hDE;
+    i_sub_addr = 16'hBEEF;
+    i_sub_len = 1'b1;               //Denote 16 bit sub addr
+    i_byte_len = 23'd4;             //Denote 4 byte write
+    @(posedge clk);
+    request_transmit <= 1'b1;
+    
+    //Now await a start indication
+    @(posedge busy);
+    $display("Requisition Granted!");
+    request_transmit = 1'b0;
+    
+    @(posedge start_ind);
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("SLAVE ADDR: %b", test_data_in);
+    $display("Desired action: %s", test_data_in[0] ? "READ" : "WRITE");
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab sub addr MSB
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Sub Addr MSB: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab sub addr LSB
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Sub Addr LSB: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Grab Byte 1 for write
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written, Byte 1: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    //This will be found between the two negedges
+    @(posedge req_data_chunk);
+    i_data_write <= 8'hAD;
+    
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab byte 2
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written Byte 2: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    //This will be found between the two negedges
+    @(posedge req_data_chunk);
+    i_data_write <= 8'hBE;
+    
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab byte 3
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written Byte 3: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    //This will be found between the two negedges
+    @(posedge req_data_chunk);
+    i_data_write <= 8'hEF;
+    
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    //Now grab byte 4
+    for(i = 7; i >= 0; i = i - 1) begin
+        @(posedge scl);
+        #1;
+        test_data_in[i] = sda;
+    end
+    $display("Data Written Byte 4: %h", test_data_in);
+    
+    @(negedge scl);
+    #10;
+    en_sda = 1;
+    test_sda = 1'b0;
+    @(negedge scl);
+    #10;
+    en_sda = 0;
+    
+    @(posedge stop_ind);
+    $display("%t, STOP INDICATION! Finished Write of 2 Bytes", $time);
+    @(negedge busy);
+    $display("Let go of bus");
+    
+    $display("******** Test Finished ********");
 end
 
 //Assigning for sda previous in testbench, and determining start and stop signals

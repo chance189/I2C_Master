@@ -424,18 +424,25 @@ always@(posedge i_clk or negedge reset_n) begin
              */
             ACK_NACK_RX: begin
                 if(!scl_prev & scl_curr) begin
-                    if(!sda_prev) begin      //checking for the ack condition (its low)
-                        state <= next_state;
-                        $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: rx ack encountered", $time);
+                    scl_is_high <= 1'b1;
+                end
+                
+                if(scl_is_high) begin
+                    if(clk_i2c_cntr == START_IND_SETUP) begin
+                        if(!sda_prev) begin      //checking for the ack condition (its low)
+                            state <= next_state;
+                            $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: rx ack encountered", $time);
+                        end
+                        else begin
+                            $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: rx nack encountered", $time);
+                            nack <= 1'b1;
+                            busy <= 1'b0;
+                            reg_sda_o <= 1'bz;
+                            en_scl <= 1'b0;
+                            state <= IDLE;
+                        end  
+                        scl_is_high <= 1'b0;
                     end
-                    else begin
-                        $display("DUT: I2C MASTER | TIMESTAMP: %t | MESSAGE: rx nack encountered", $time);
-                        nack <= 1'b1;
-                        //busy <= 1'b0;
-                        //reg_sda_o <= 1'bz;
-                        //en_scl <= 1'b0;
-                        state <= next_state;
-                    end  
                 end
             end
             
@@ -446,15 +453,21 @@ always@(posedge i_clk or negedge reset_n) begin
              *               pull the line low for an ack. On second negedge, release sda.
              */
             ACK_NACK_TX: begin
-                if(!scl_curr & scl_prev) begin      //negedge
-                    if(ack_in_prog) begin 
-                        reg_sda_o <= ack_nack;          //write ack until negedge of clk
-                        ack_in_prog <= 1'b0;
-                    end
-                    else begin
-                        reg_sda_o <= next_state == STOP ? 1'b0 : 1'bz;
-                        en_end_indicator <= next_state == STOP ? 1'b1 : en_end_indicator;
-                        state <= next_state;
+                if(!scl_curr & scl_prev) begin
+                    scl_is_low <= 1'b1;
+                end
+                if(scl_is_low) begin          //negedge
+                    if(clk_i2c_cntr == DATA_HOLD_TIME) begin
+                        if(ack_in_prog) begin 
+                            reg_sda_o <= ack_nack;          //write ack until negedge of clk
+                            ack_in_prog <= 1'b0;
+                        end
+                        else begin
+                            reg_sda_o <= next_state == STOP ? 1'b0 : 1'bz;
+                            en_end_indicator <= next_state == STOP ? 1'b1 : en_end_indicator;
+                            state <= next_state;
+                        end
+                        scl_is_low <= 1'b0;
                     end
                 end
             end
@@ -466,7 +479,7 @@ always@(posedge i_clk or negedge reset_n) begin
              */
             STOP: begin 
                 if(!scl_curr & scl_prev & !rw) begin //negedge only if we are writing
-                    reg_sda_o <= 1'b0;         //Set to low
+                    reg_sda_o <= 1'b0;               //Set to low
                     en_end_indicator <= 1'b1;
                 end
                 
