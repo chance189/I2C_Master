@@ -143,7 +143,7 @@ always@(posedge clk or negedge rst) begin
                     next_state <= INCR_DATA_AQ;
                     request_transmit <= 1'b1;
                     read_bytes <= 0;
-                    SSEG_data <= temp_data[15] ? ((!temp_data) + 1) / 128 : temp_data/128;
+                    SSEG_data <= temp_data[15] ? ((~temp_data) + 1) / 128 : temp_data/128;  //Note here want bitwise not(~), not logical not(!), since we want to take 2's complement
                 end
             end
             
