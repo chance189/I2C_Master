@@ -23,7 +23,8 @@ To see all internal registers, uncomment the "\`define DEBUG" at the top of both
 ### Verification on Nexys 4 DDR
 
 In the folder \Nexys_4_Test a few files are included: top.v, and SSEG.v, and nexys.xdc. The files are utilized to run on the Nexys 4, communicating with the ADT7420 on the board, getting Celcius temperature readings every
-second, and display them on the seven segment displays. The input switches are used to select 
+second, and display them on the seven segment displays. Note that the output temperature is in Celcius, and is rounded to nearest integer. To get decimal, simply shift to the right however decimal precision you want, and select a fixed point.
+The output temperature is displayed in hexadecimal, therefore 1A would be equal to 26C, or 78.8F. 
 
 ### Author
 * Chance Reimer
